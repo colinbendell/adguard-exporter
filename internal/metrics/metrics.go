@@ -102,13 +102,13 @@ var (
 		Name:      "queries_details",
 		Namespace: "adguard",
 		Help:      "Total queries by user",
-	}, []string{"server", "user", "reason", "status", "upstream", "client_name", "protocol"})
+	}, []string{"server", "user", "reason", "status", "upstream", "client_name", "protocol", "etld_domain"})
 	TotalQueriesDetailsHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:      "queries_details_histogram",
 		Namespace: "adguard",
 		Help:      "Total queries by user",
 		Buckets:   prometheus.LinearBuckets(0, 10, 10),
-	}, []string{"server", "user", "reason", "status", "upstream", "client_name", "protocol"})
+	}, []string{"server", "user", "reason", "status", "upstream", "client_name", "protocol", "etld_domain"})
 
 	// DHCP
 	DhcpEnabled = prometheus.NewGaugeVec(prometheus.GaugeOpts{

@@ -3,12 +3,15 @@ package worker
 import (
 	"context"
 	"log"
+	"net"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/henrywhitaker3/adguard-exporter/internal/adguard"
 	"github.com/henrywhitaker3/adguard-exporter/internal/metrics"
+	"golang.org/x/net/publicsuffix"
 )
 
 var (
@@ -133,6 +136,33 @@ func collectDhcp(ctx context.Context, client *adguard.Client) {
 	metrics.DhcpLeases.Record(client.Url(), dhcp.Leases)
 }
 
+// getETLDPlusOne extracts the eTLD+1 (effective top-level domain + 1) from a domain name.
+// For example: "www.example.com" -> "example.com", "api.github.com" -> "github.com"
+// Returns the original domain if extraction fails or for invalid domains.
+func getETLDPlusOne(domain string) string {
+	// Remove trailing dot if present
+	domain = strings.TrimSuffix(domain, ".")
+
+	// Return empty string as-is
+	if domain == "" {
+		return domain
+	}
+
+	// Check if this is an IP address - if so, return as-is
+	if net.ParseIP(domain) != nil {
+		return domain
+	}
+
+	// Extract eTLD+1
+	etldPlusOne, err := publicsuffix.EffectiveTLDPlusOne(domain)
+	if err != nil {
+		// If extraction fails (e.g., for invalid domains), return the original
+		return domain
+	}
+
+	return etldPlusOne
+}
+
 func collectQueryLogStats(ctx context.Context, client *adguard.Client) {
 	stats, times, queries, err := client.GetQueryLog(ctx)
 	if err != nil {
@@ -156,8 +186,9 @@ func collectQueryLogStats(ctx context.Context, client *adguard.Client) {
 		if protocol == "" {
 			protocol = "plain"
 		}
-		metrics.TotalQueriesDetails.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol).Set(elapsed)
-		metrics.TotalQueriesDetailsHistogram.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol).Observe(float64(elapsed))
+		etldDomain := getETLDPlusOne(l.Question.Host)
+		metrics.TotalQueriesDetails.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain).Set(elapsed)
+		metrics.TotalQueriesDetailsHistogram.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain).Observe(float64(elapsed))
 	}
 
 	for _, t := range times {
