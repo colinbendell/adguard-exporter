@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"slices"
@@ -187,9 +188,19 @@ func collectQueryLogStats(ctx context.Context, client *adguard.Client) {
 			protocol = "plain"
 		}
 		etldDomain := getETLDPlusOne(l.Question.Host)
-		metrics.TotalQueriesDetails.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain).Set(elapsed)
-		metrics.TotalQueriesDetailsHistogram.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain).Observe(float64(elapsed))
+		categories := CategorizeDomain(l.Question.Host)
+
+		// Join categories into comma-separated string, use "unknown" if empty
+		categoryLabel := strings.Join(categories, ",")
+		if categoryLabel == "" {
+			categoryLabel = "unknown"
+		}
+
+		metrics.TotalQueriesDetails.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel).Set(elapsed)
+		metrics.TotalQueriesDetailsHistogram.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel).Observe(float64(elapsed))
 	}
+    // print to the console the number of queries
+    fmt.Printf("Number of queries: %d\n", len(queries))
 
 	for _, t := range times {
 		metrics.ProcessingTimeBucketMilli.
