@@ -139,29 +139,151 @@ func (c *Client) GetDhcp(ctx context.Context) (*DhcpStatus, error) {
 	return out, nil
 }
 
-// func (c *Client) GetQueryLog(ctx context.Context) (map[string]map[string]int, []QueryTime, QueryPerClient, error) {
-func (c *Client) GetQueryLog(ctx context.Context) (map[string]map[string]int, []QueryTime, []logEntry, error) {
-	log := &queryLog{}
-	err := c.do(ctx, http.MethodGet, "/control/querylog?limit=1000&response_status=all", log)
-	if err != nil {
-		return nil, nil, nil, err
+// GetQueryLog fetches query log entries, optionally filtering by lastQueryEpoch.
+// If lastQueryEpoch is 0 (zero value), all records are returned.
+// Automatically fetches additional batches if there's a gap between oldest and lastQueryEpoch.
+// Returns: query types map, query times slice, filtered log entries, latest timestamp (epoch), error
+func (c *Client) GetQueryLog(ctx context.Context, lastQueryEpoch int64) (map[string]map[string]int, []QueryTime, []logEntry, int64, error) {
+	allEntries := []logEntry{}
+	olderThan := ""
+	maxIterations := 1000 // Safety limit to prevent infinite loops
+	iterations := 0
+
+	for {
+		iterations++
+		if iterations > maxIterations {
+			log.Printf("WARNING - reached maximum pagination iterations (%d), stopping", maxIterations)
+			break
+		}
+
+		// Build URL with optional older_than parameter (use RFC3339 for API)
+		url := "/control/querylog?limit=50000&response_status=all"
+		if olderThan != "" {
+			url += "&older_than=" + olderThan
+		}
+
+		queryLog := &queryLog{}
+		err := c.do(ctx, http.MethodGet, url, queryLog)
+		if err != nil {
+			return nil, nil, nil, 0, err
+		}
+
+		// If no entries returned, we've reached the end
+		if len(queryLog.Log) == 0 {
+			break
+		}
+
+		// Accumulate entries
+		allEntries = append(allEntries, queryLog.Log...)
+
+		// If oldest entry is still newer than lastQueryEpoch, we have a gap - fetch more
+		// Convert oldest to epoch for comparison
+		if queryLog.Oldest != "" {
+			oldestEpoch, err := rfc3339ToEpoch(queryLog.Oldest)
+			if err != nil {
+				log.Printf("WARNING - invalid oldest timestamp %s: %v, stopping pagination", queryLog.Oldest, err)
+				break
+			}
+
+			if oldestEpoch > lastQueryEpoch {
+				olderThan = queryLog.Oldest // Keep RFC3339 for API parameter
+				log.Printf(" - Fetching batch prior to %s (last: %d)", olderThan, len(queryLog.Log))
+				continue
+			}
+		}
+
+		// We've reached or passed the lastQueryEpoch, stop fetching
+		break
 	}
 
-	types, err := c.getQueryTypes(log)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	times, err := c.getQueryTimes(log)
-	if err != nil {
-		return nil, nil, nil, err
+	// Filter log entries by timestamp if lastQueryEpoch is provided
+	filteredLog := allEntries
+	if lastQueryEpoch > 0 {
+		filteredLog = c.filterByTimestamp(allEntries, lastQueryEpoch)
 	}
 
-	return types, times, log.Log, nil
+	// Find the latest timestamp from the filtered results
+	newLastQueryEpoch := c.getLatestTimestamp(filteredLog)
+
+	types, err := c.getQueryTypes(filteredLog)
+	if err != nil {
+		return nil, nil, nil, newLastQueryEpoch, err
+	}
+	times, err := c.getQueryTimes(filteredLog)
+	if err != nil {
+		return nil, nil, nil, newLastQueryEpoch, err
+	}
+
+	log.Printf("Fetched %d total entries, %d after filtering (iterations: %d)", len(allEntries), len(filteredLog), iterations)
+
+	return types, times, filteredLog, newLastQueryEpoch, nil
 }
 
-func (c *Client) getQueryTypes(log *queryLog) (map[string]map[string]int, error) {
+// rfc3339ToEpoch converts RFC3339 timestamp string to Unix epoch milliseconds
+func rfc3339ToEpoch(rfc3339Time string) (int64, error) {
+	t, err := time.Parse(time.RFC3339Nano, rfc3339Time)
+	if err != nil {
+		return 0, err
+	}
+	return t.UnixMilli(), nil
+}
+
+// epochToRFC3339 converts Unix epoch milliseconds to RFC3339 timestamp string
+func epochToRFC3339(epochMillis int64) string {
+	t := time.UnixMilli(epochMillis)
+	return t.Format(time.RFC3339Nano)
+}
+
+// filterByTimestamp filters log entries to only include those after lastQueryEpoch
+func (c *Client) filterByTimestamp(entries []logEntry, lastQueryEpoch int64) []logEntry {
+	if lastQueryEpoch == 0 {
+		return entries
+	}
+
+	filtered := make([]logEntry, 0, len(entries))
+	for _, entry := range entries {
+		entryEpoch, err := rfc3339ToEpoch(entry.Time)
+		if err != nil {
+			log.Printf("WARNING - invalid entry timestamp %s: %v, skipping", entry.Time, err)
+			continue
+		}
+
+		// Only include entries with timestamps greater than lastQueryEpoch
+		if entryEpoch > lastQueryEpoch {
+			filtered = append(filtered, entry)
+		}
+	}
+
+	return filtered
+}
+
+// getLatestTimestamp finds the latest (highest) timestamp from log entries
+// Returns the timestamp as Unix epoch milliseconds
+func (c *Client) getLatestTimestamp(entries []logEntry) int64 {
+	if len(entries) == 0 {
+		return 0
+	}
+
+	var latestEpoch int64
+
+	for _, entry := range entries {
+		entryEpoch, err := rfc3339ToEpoch(entry.Time)
+		if err != nil {
+			log.Printf("WARNING - invalid entry timestamp %s: %v, skipping", entry.Time, err)
+			continue
+		}
+
+		if entryEpoch > latestEpoch {
+			latestEpoch = entryEpoch
+		}
+	}
+
+	return latestEpoch
+}
+
+func (c *Client) getQueryTypes(entries []logEntry) (map[string]map[string]int, error) {
 	out := map[string]map[string]int{}
-	for _, d := range log.Log {
+	for _, d := range entries {
 		if len(d.Answer) > 0 {
 			if _, ok := out[d.Client]; !ok {
 				out[d.Client] = map[string]int{}
@@ -181,15 +303,15 @@ func (c *Client) getQueryTypes(log *queryLog) (map[string]map[string]int, error)
 	return out, nil
 }
 
-func (c *Client) getQueryTimes(l *queryLog) ([]QueryTime, error) {
+func (c *Client) getQueryTimes(entries []logEntry) ([]QueryTime, error) {
 	out := []QueryTime{}
-	for _, q := range l.Log {
+	for _, q := range entries {
 		if q.Upstream == "" {
 			q.Upstream = "self"
 		}
 		ms, err := strconv.ParseFloat(q.Elapsed, 32)
 		if err != nil {
-			log.Printf("ERROR - could not parse query elapsed time %v as float\n", q.Elapsed)
+			log.Printf("ERROR - could not parse query elapsed time %v as float", q.Elapsed)
 			continue
 		}
 		out = append(out, QueryTime{
