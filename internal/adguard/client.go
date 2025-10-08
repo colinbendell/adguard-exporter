@@ -165,7 +165,10 @@ func (c *Client) GetQueryLog(ctx context.Context, lastQueryEpoch int64) (map[str
 		queryLog := &queryLog{}
 		err := c.do(ctx, http.MethodGet, url, queryLog)
 		if err != nil {
-			return nil, nil, nil, 0, err
+			log.Printf("ERROR - could not get query log: %v", err)
+            // sleep for 5 second
+            time.Sleep(5 * time.Second)
+			continue
 		}
 
 		// If no entries returned, we've reached the end

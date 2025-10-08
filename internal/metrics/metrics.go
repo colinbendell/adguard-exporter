@@ -109,6 +109,11 @@ var (
 		Help:      "Total queries by user",
 		Buckets:   prometheus.LinearBuckets(0, 10, 10),
 	}, []string{"server", "user", "reason", "status", "upstream", "client_name", "protocol", "etld_domain", "category", "query_type"})
+	TotalQueriesDetailsCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name:      "queries_details_count",
+		Namespace: "adguard",
+		Help:      "Total queries by user",
+	}, []string{"server", "user", "reason", "status", "upstream", "client_name", "protocol", "etld_domain", "category", "query_type"})
 
 	// DHCP
 	DhcpEnabled = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -187,6 +192,7 @@ func Init() {
 	prometheus.MustRegister(ProcessingTimeBucketMilli)
 	prometheus.MustRegister(TotalQueriesDetails)
 	prometheus.MustRegister(TotalQueriesDetailsHistogram)
+	prometheus.MustRegister(TotalQueriesDetailsCounter)
 
 	// Status
 	prometheus.MustRegister(Running)
