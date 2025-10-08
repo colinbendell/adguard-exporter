@@ -189,6 +189,10 @@ func collectQueryLogStats(ctx context.Context, client *adguard.Client) {
 		}
 		etldDomain := getETLDPlusOne(l.Question.Host)
 		categories := CategorizeDomain(l.Question.Host)
+		queryType := l.Question.Type
+		if queryType == "" {
+			queryType = "unknown"
+		}
 
 		// Join categories into comma-separated string, use "unknown" if empty
 		categoryLabel := strings.Join(categories, ",")
@@ -196,8 +200,8 @@ func collectQueryLogStats(ctx context.Context, client *adguard.Client) {
 			categoryLabel = "unknown"
 		}
 
-		metrics.TotalQueriesDetails.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel).Set(elapsed)
-		metrics.TotalQueriesDetailsHistogram.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel).Observe(float64(elapsed))
+		metrics.TotalQueriesDetails.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel, queryType).Set(elapsed)
+		metrics.TotalQueriesDetailsHistogram.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel, queryType).Observe(float64(elapsed))
 	}
     // print to the console the number of queries
     fmt.Printf("Number of queries: %d\n", len(queries))
