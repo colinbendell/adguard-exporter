@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,13 +13,25 @@ import (
 
 	"github.com/henrywhitaker3/adguard-exporter/internal/adguard"
 	"github.com/henrywhitaker3/adguard-exporter/internal/metrics"
+	"github.com/henrywhitaker3/adguard-exporter/internal/state"
 	"golang.org/x/net/publicsuffix"
 )
 
 var (
-	initialised = []string{}
-	versions    = map[string]string{}
+	initialised  = []string{}
+	versions     = map[string]string{}
+	workerState  *state.State
+	stateInitErr error
 )
+
+func init() {
+	// Initialize state with default path
+	stateFilePath := ".cache/adguard-exporter/state.json"
+	workerState, stateInitErr = state.New(stateFilePath)
+	if stateInitErr != nil {
+		fmt.Fprintf(os.Stderr, "WARNING - could not initialize state file: %v (will process all records)\n", stateInitErr)
+	}
+}
 
 func Work(ctx context.Context, interval time.Duration, clients []*adguard.Client) {
 	log.Printf("Collecting metrics every %s\n", interval)
@@ -165,11 +178,24 @@ func getETLDPlusOne(domain string) string {
 }
 
 func collectQueryLogStats(ctx context.Context, client *adguard.Client) {
-	stats, times, queries, err := client.GetQueryLog(ctx)
+	// Get last query time from state (0 if none exists)
+	var lastQueryEpoch int64
+	if workerState != nil {
+		lastQueryEpoch = workerState.GetLastQueryTime(client.Url())
+	}
+
+	stats, times, queries, latestEpoch, err := client.GetQueryLog(ctx, lastQueryEpoch)
 	if err != nil {
 		log.Printf("ERROR - could not get query type stats: %v\n", err)
 		metrics.ScrapeErrors.WithLabelValues(client.Url()).Inc()
 		return
+	}
+
+	// Update state with the latest timestamp if we got any records
+	if latestEpoch > 0 && workerState != nil {
+		if err := workerState.SetLastQueryTime(client.Url(), latestEpoch); err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING - could not save last query time: %v\n", err)
+		}
 	}
 
 	for c, v := range stats {
@@ -203,8 +229,8 @@ func collectQueryLogStats(ctx context.Context, client *adguard.Client) {
 		metrics.TotalQueriesDetails.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel, queryType).Set(elapsed)
 		metrics.TotalQueriesDetailsHistogram.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel, queryType).Observe(float64(elapsed))
 	}
-    // print to the console the number of queries
-    fmt.Printf("Number of queries: %d\n", len(queries))
+
+    log.Printf("Retrieved: %d records", len(queries))
 
 	for _, t := range times {
 		metrics.ProcessingTimeBucketMilli.
@@ -214,4 +240,112 @@ func collectQueryLogStats(ctx context.Context, client *adguard.Client) {
 			WithLabelValues(client.Url(), t.Client, t.Upstream).
 			Observe(t.Elapsed.Seconds())
 	}
+}
+
+// PrintQueryLogStats fetches and prints query log details to console instead of recording to Prometheus
+// This is useful for debugging and understanding what data would be collected
+// Informational messages go to stderr, record data goes to stdout
+func PrintQueryLogStats(ctx context.Context, client *adguard.Client) error {
+	// Get last query time from state (0 if none exists)
+	var lastQueryEpoch int64
+	if workerState != nil {
+		lastQueryEpoch = workerState.GetLastQueryTime(client.Url())
+	}
+
+	stats, times, queries, latestEpoch, err := client.GetQueryLog(ctx, lastQueryEpoch)
+	if err != nil {
+		return fmt.Errorf("could not get query log: %w", err)
+	}
+
+	log.Printf("# %s", client.Url())
+	log.Printf("  - %d Records between: %s ... %s", len(queries), time.UnixMilli(lastQueryEpoch).Format(time.RFC3339Nano), time.UnixMilli(latestEpoch).Format(time.RFC3339Nano))
+
+	// Print query type stats
+	if len(stats) > 0 {
+		log.Printf("## Query Types by Client")
+        fmt.Printf("%-15s\t%-10s\t%s\n", "Client", "Type", "Count")
+		for clientIP, types := range stats {
+			for queryType, count := range types {
+				fmt.Printf("%-15s\t%-10s\t%d\n", clientIP, queryType, count)
+			}
+		}
+	}
+
+	// Print query details (like TotalQueriesDetails metric) - records go to stdout
+	if len(queries) > 0 {
+		log.Printf("## Details")
+
+		fmt.Printf("%-15s\t%-15s\t%-20s\t%-10s\t%-15s\t%-30s\t%-15s\t%-10s\t%-25s\t%-10s\t%s\n",
+			"Server", "Client", "ClientName", "Reason", "Status", "Upstream", "Protocol", "QueryType", "eTLD+1", "Category", "Elapsed(ms)")
+
+		// Header to stdout
+		fmt.Printf("%-15s %-15s %-20s %-10s %-15s %-30s %-15s %-10s %-25s %-10s %s\n",
+			"Server", "Client", "ClientName", "Reason", "Status", "Upstream", "Protocol", "QueryType", "eTLD+1", "Category", "Elapsed(ms)")
+		fmt.Println(strings.Repeat("-", 180))
+
+		// Records to stdout
+		for _, l := range queries {
+			elapsed, err := strconv.ParseFloat(l.Elapsed, 64)
+			if err != nil {
+				continue
+			}
+
+			protocol := l.ClientProto
+			if protocol == "" {
+				protocol = "plain"
+			}
+
+			etldDomain := getETLDPlusOne(l.Question.Host)
+			categories := CategorizeDomain(l.Question.Host)
+			queryType := l.Question.Type
+			if queryType == "" {
+				queryType = "unknown"
+			}
+
+			categoryLabel := strings.Join(categories, ",")
+			if categoryLabel == "" {
+				categoryLabel = "unknown"
+			}
+
+			// Truncate long fields for better display
+			clientName := l.ClientInfo.Name
+			if len(clientName) > 18 {
+				clientName = clientName[:15] + "..."
+			}
+			upstream := l.Upstream
+			if len(upstream) > 28 {
+				upstream = upstream[:25] + "..."
+			}
+			etld := etldDomain
+			if len(etld) > 23 {
+				etld = etld[:20] + "..."
+			}
+
+			fmt.Printf("%-15s %-15s %-20s %-10s %-15s %-30s %-15s %-10s %-25s %-10s %.2f\n",
+				client.Url(), l.Client, clientName, l.Reason, l.Status, upstream, protocol, queryType, etld, categoryLabel, elapsed)
+		}
+		fmt.Println()
+	}
+
+	// Print processing times summary to stderr
+	if len(times) > 0 {
+		log.Printf("## Processing Times Summary")
+		log.Printf("  - Total timing entries: %d", len(times))
+		var totalTime time.Duration
+		for _, t := range times {
+			totalTime += t.Elapsed
+		}
+		avgTime := totalTime / time.Duration(len(times))
+		log.Printf("  - Average processing time: %v\n", avgTime)
+	}
+
+	// Update state with the latest timestamp if we got any records
+	if latestEpoch > 0 && workerState != nil {
+		if err := workerState.SetLastQueryTime(client.Url(), latestEpoch); err != nil {
+			return fmt.Errorf("could not save last query time: %w", err)
+		}
+		log.Printf("  - Updated latest query time: %s", time.UnixMilli(latestEpoch).Format(time.RFC3339Nano))
+	}
+
+	return nil
 }
