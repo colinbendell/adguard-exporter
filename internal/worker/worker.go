@@ -225,9 +225,14 @@ func collectQueryLogStats(ctx context.Context, client *adguard.Client) {
 		if categoryLabel == "" {
 			categoryLabel = "unknown"
 		}
+        clientName := l.ClientInfo.Name
+        if clientName == "" {
+            clientName = l.Client
+        }
 
-		metrics.TotalQueriesDetails.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel, queryType).Set(elapsed)
-		metrics.TotalQueriesDetailsHistogram.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, l.ClientInfo.Name, protocol, etldDomain, categoryLabel, queryType).Observe(float64(elapsed))
+		metrics.TotalQueriesDetails.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, clientName, protocol, etldDomain, categoryLabel, queryType).Set(elapsed)
+		metrics.TotalQueriesDetailsHistogram.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, clientName, protocol, etldDomain, categoryLabel, queryType).Observe(float64(elapsed))
+		metrics.TotalQueriesDetailsCounter.WithLabelValues(client.Url(), l.Client, l.Reason, l.Status, l.Upstream, clientName, protocol, etldDomain, categoryLabel, queryType).Inc()
 	}
 
     log.Printf("Retrieved: %d records", len(queries))
@@ -252,7 +257,7 @@ func PrintQueryLogStats(ctx context.Context, client *adguard.Client) error {
 		lastQueryEpoch = workerState.GetLastQueryTime(client.Url())
 	}
 
-	stats, times, queries, latestEpoch, err := client.GetQueryLog(ctx, lastQueryEpoch)
+	_, times, queries, latestEpoch, err := client.GetQueryLog(ctx, lastQueryEpoch)
 	if err != nil {
 		return fmt.Errorf("could not get query log: %w", err)
 	}
@@ -260,36 +265,15 @@ func PrintQueryLogStats(ctx context.Context, client *adguard.Client) error {
 	log.Printf("# %s", client.Url())
 	log.Printf("  - %d Records between: %s ... %s", len(queries), time.UnixMilli(lastQueryEpoch).Format(time.RFC3339Nano), time.UnixMilli(latestEpoch).Format(time.RFC3339Nano))
 
-	// Print query type stats
-	if len(stats) > 0 {
-		log.Printf("## Query Types by Client")
-        fmt.Printf("%-15s\t%-10s\t%s\n", "Client", "Type", "Count")
-		for clientIP, types := range stats {
-			for queryType, count := range types {
-				fmt.Printf("%-15s\t%-10s\t%d\n", clientIP, queryType, count)
-			}
-		}
-	}
-
-	// Print query details (like TotalQueriesDetails metric) - records go to stdout
+    // Print query details (like TotalQueriesDetails metric) - records go to stdout
 	if len(queries) > 0 {
 		log.Printf("## Details")
 
-		fmt.Printf("%-15s\t%-15s\t%-20s\t%-10s\t%-15s\t%-30s\t%-15s\t%-10s\t%-25s\t%-10s\t%s\n",
-			"Server", "Client", "ClientName", "Reason", "Status", "Upstream", "Protocol", "QueryType", "eTLD+1", "Category", "Elapsed(ms)")
-
-		// Header to stdout
-		fmt.Printf("%-15s %-15s %-20s %-10s %-15s %-30s %-15s %-10s %-25s %-10s %s\n",
-			"Server", "Client", "ClientName", "Reason", "Status", "Upstream", "Protocol", "QueryType", "eTLD+1", "Category", "Elapsed(ms)")
-		fmt.Println(strings.Repeat("-", 180))
+		fmt.Printf("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+			"timestamp", "job", "instance", "server", "user", "client_name", "reason", "status", "server", "protocol", "query_type", "etld_domain", "category", "elapsed")
 
 		// Records to stdout
 		for _, l := range queries {
-			elapsed, err := strconv.ParseFloat(l.Elapsed, 64)
-			if err != nil {
-				continue
-			}
-
 			protocol := l.ClientProto
 			if protocol == "" {
 				protocol = "plain"
@@ -309,20 +293,24 @@ func PrintQueryLogStats(ctx context.Context, client *adguard.Client) error {
 
 			// Truncate long fields for better display
 			clientName := l.ClientInfo.Name
-			if len(clientName) > 18 {
-				clientName = clientName[:15] + "..."
-			}
+            if clientName == "" {
+                clientName = l.Client
+            }
 			upstream := l.Upstream
-			if len(upstream) > 28 {
-				upstream = upstream[:25] + "..."
-			}
+            if upstream == "" {
+                upstream = "NA"
+            }
 			etld := etldDomain
-			if len(etld) > 23 {
-				etld = etld[:20] + "..."
-			}
+            event_time, _ := time.Parse(time.RFC3339Nano, l.Time)
+            event_time_unix_ms := event_time.UnixMilli()
 
-			fmt.Printf("%-15s %-15s %-20s %-10s %-15s %-30s %-15s %-10s %-25s %-10s %.2f\n",
-				client.Url(), l.Client, clientName, l.Reason, l.Status, upstream, protocol, queryType, etld, categoryLabel, elapsed)
+			elapsed, _ := strconv.ParseFloat(l.Elapsed, 64)
+			// if err != nil {
+			// 	continue
+			// }
+
+			fmt.Printf("%d,adguard,adguardexporter:9618,%s,%s,%s,%s,%s,%s,%s,%s,%s,\"%s\",%0.6f\n",
+				event_time_unix_ms, client.Url(), l.Client, clientName, l.Reason, l.Status, upstream, protocol, queryType, etld, categoryLabel, elapsed)
 		}
 		fmt.Println()
 	}
