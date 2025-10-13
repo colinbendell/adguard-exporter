@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 
 	"github.com/henrywhitaker3/adguard-exporter/internal/adguard"
@@ -14,6 +17,21 @@ import (
 )
 
 func main() {
+	// Command line flags
+	listCategories := flag.Bool("list-categories", false, "List all available DNS categories and exit")
+	flag.Parse()
+
+	// Handle list-categories flag
+	if *listCategories {
+		categories := worker.GetAvailableCategories()
+		sort.Strings(categories)
+		fmt.Printf("Available DNS categories (%d total):\n\n", len(categories))
+		for _, cat := range categories {
+			fmt.Printf("  - %s\n", cat)
+		}
+		os.Exit(0)
+	}
+
 	metrics.Init()
 	global, err := config.FromEnv()
 	if err != nil {
